@@ -4,6 +4,7 @@ import com.clarifai.api.ClarifaiClient;
 import com.clarifai.api.RecognitionRequest;
 import com.clarifai.api.RecognitionResult;
 import com.clarifai.api.Tag;
+import com.mongodb.*;
 import org.eclipse.jetty.util.MultiPartInputStreamParser;
 import spark.Request;
 import spark.Response;
@@ -16,25 +17,77 @@ import us.monoid.web.Resty;
 import javax.servlet.MultipartConfigElement;
 import java.io.File;
 import java.io.IOException;
+import java.net.UnknownHostException;
+import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
+import java.util.Random;
 
+import static spark.Spark.get;
 import static spark.Spark.post;
 
 /**
  * Created by john on 9/4/15.
  */
 public class Server {
+    private static List<String> blacklist = new ArrayList<>();
     public static void main(String[] args) {
-        getFood("butter");
+        try {
+            blacklist.addAll(Files.readAllLines(new File("blacklist").toPath()));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
         post("/uploadimage", new Route() {
             @Override
             public Object handle(Request req, Response res) throws Exception {
                 MultipartConfigElement multipartConfigElement = new MultipartConfigElement("/tmp");
                 req.raw().setAttribute("org.eclipse.multipartConfig", multipartConfigElement);
                 MultiPartInputStreamParser.MultiPart file = (MultiPartInputStreamParser.MultiPart) req.raw().getPart("file");
-                System.out.println(getTags(file.getFile()));
-                return file.getFile();
+                List<Tag> tags = getTags(file.getFile());
+
+                for (Tag tag : tags) {
+                    if (!blacklist.contains(tag.getName())) {
+                        Food food = getFood(tag.getName(),"1");
+                        if (food != null) {
+                            storeInServer(food);
+                            System.out.println("ueouaoeuoa");
+                            return caloriesToday("1");
+                        }
+                    }
+                }
+
+                return "food not found";
+            }
+        });
+        get("/uploadimage", new Route() {
+            @Override
+            public Object handle(Request req, Response res) throws Exception {
+                return "<form action=\"/uploadimage\" method=\"post\" enctype=\"multipart/form-data\">\n" +
+                        "<input type=\"file\" accept=\"image/*\" capture=\"camera\" name=\"file\">\n" +
+                        "  <input type=\"text\" name=\"firstname\">\n<input type=\"submit\">\n" +
+                        "</form>";
+            }
+        });
+        get("/stats/:id/:city", new Route() {
+            @Override
+            public Object handle(Request req, Response res) throws Exception {
+                String userId = req.params(":id");
+                double calories = caloriesToday(userId);
+                double avgCityCalories = avgCaloriesInCityToday(req.params("city"));
+                double lastCalories = lastCalories(userId);
+                JSONObject jsonObject = new JSONObject();
+                jsonObject.put("calories",calories);
+                jsonObject.put("avg_city",avgCityCalories);
+                jsonObject.put("last_calories",lastCalories);
+                return jsonObject.toString();
+            }
+        });
+        get("/log/:id", new Route() {
+            @Override
+            public Object handle(Request req, Response res) throws Exception {
+                String userId = req.params(":id");
+                return allCalorieLog(userId).toString();
             }
         });
     }
@@ -51,7 +104,8 @@ public class Server {
         }
         return tags;
     }
-    public static Food getFood(String in) {
+    public static Food getFood(String in, String userId) {
+        System.out.println("search id: " + in);
         String url = "http://api.nal.usda.gov/ndb/search/?format=json&q="+in.replace(" ","%20")+"&sort=n&max=25&offset=0&api_key=DCrGYJ3xz3F5JnHMi2WRbIxHLYUvx3Rgn14mce15";
         try {
             JSONArray jsonArray = new Resty().json(url).object().getJSONObject("list").getJSONArray("item");
@@ -68,8 +122,10 @@ public class Server {
                 return null;
             }
             String id = shortest.getString("ndbno");
+            String foodGroup = shortest.getString("group");
             JSONObject jsonObject = new Resty().json("http://api.nal.usda.gov/ndb/reports/?ndbno=" + id + "&type=b&format=json&api_key=DCrGYJ3xz3F5JnHMi2WRbIxHLYUvx3Rgn14mce15").object();
             JSONArray nuArray = jsonObject.getJSONObject("report").getJSONObject("food").getJSONArray("nutrients");
+            System.out.println(jsonObject);
             double kcal = 0;
             for (int i = 0; i < nuArray.length(); i++) {
                 JSONObject mObject = nuArray.getJSONObject(i);
@@ -78,13 +134,112 @@ public class Server {
                     break;
                 }
             }
-            System.out.println(kcal);
+            System.out.println("name: " + shortest.getString("name") + " - " + kcal);
+            Food food = new Food();
+            food.setCalories(kcal);
+            food.setId(new Random().nextInt(100000) + "");
+            food.setUserId(userId);
+            food.setDate(new Date());
+            food.setGroup(foodGroup);
+            food.setName(shortest.getString("name"));
+            return food;
         } catch (IOException e) {
             e.printStackTrace();
         } catch (JSONException e) {
             e.printStackTrace();
         }
         return null;
+    }
+    private static void storeInServer(Food food) {
+        try {
+            MongoClient mongoClient = new MongoClient();
+            DB db = mongoClient.getDB("test");
+            DBCollection coll = db.getCollection("food_log");
+            coll.insert(food);
+            mongoClient.close();
+        } catch (UnknownHostException e) {
+            e.printStackTrace();
+        }
+    }
+    private static double caloriesToday(String userId) {
+        try {
+            MongoClient mongoClient = new MongoClient();
+            DB db = mongoClient.getDB("test");
+            DBCollection coll = db.getCollection("food_log");
+            double cal = 0;
+            for (DBObject dbObject : coll.find()) {
+                if (dbObject.containsField("cal")) {
+                    cal += (Double)dbObject.get("cal");
+                }
+            }
+            return cal;
+        } catch (UnknownHostException e) {
+            e.printStackTrace();
+        }
+        return 0;
+    }
+    public static JSONArray allCalorieLog(String id) {
+        try {
+            MongoClient mongoClient = new MongoClient();
+            DB db = mongoClient.getDB("test");
+            DBCollection coll = db.getCollection("food_log");
+            JSONArray jsonArray = new JSONArray();
+            for (DBObject dbObject : coll.find(new BasicDBObject("user_id",id))) {
+                jsonArray.put(dbObject);
+            }
+            return jsonArray;
+        } catch (UnknownHostException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+    public static double lastCalories(String id) {
+        try {
+            MongoClient mongoClient = new MongoClient();
+            DB db = mongoClient.getDB("test");
+            DBCollection coll = db.getCollection("food_log");
+            long lastDate = -1;
+            DBObject last = null;
+            for (DBObject dbObject : coll.find(new BasicDBObject("user_id",id))) {
+                Date date = (Date) dbObject.get("date");
+                if (last == null || lastDate < date.getTime()) {
+                    lastDate = date.getTime();
+                    last = dbObject;
+                }
+            }
+            if (last == null) {
+                return 0;
+            }
+            return (double) last.get("cal");
+        } catch (UnknownHostException e) {
+            e.printStackTrace();
+        }
+        return 0;
+    }
+    public static double avgCaloriesInCityToday(String cityName) {
+        try {
+            MongoClient mongoClient = new MongoClient();
+            DB db = mongoClient.getDB("test");
+            DBCollection coll = db.getCollection("food_log");
+            double cal = 0;
+            List<String> usersCovered = new ArrayList<>();
+            for (DBObject dbObject : coll.find()) {
+                if (dbObject.containsField("city") && cityName.equalsIgnoreCase((String) dbObject.get("city"))) {
+                    cal += (Double)dbObject.get("cal");
+                    String userId = (String) dbObject.get("user_id");
+                    if (!usersCovered.contains(userId)) {
+                        usersCovered.add(userId);
+                    }
+                }
+            }
+            if (usersCovered.size() == 0) {
+                return 0;
+            }
+            return cal/usersCovered.size();
+        } catch (UnknownHostException e) {
+            e.printStackTrace();
+        }
+        return 0;
     }
 
 }

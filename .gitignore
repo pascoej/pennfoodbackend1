@@ -3,3 +3,5 @@ target
 pennfood.iml
 pom.xml
 lastimage.jpg
+.DS_Store
+src/.DS_Store

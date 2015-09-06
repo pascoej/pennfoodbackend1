@@ -6,6 +6,9 @@ import com.clarifai.api.RecognitionResult;
 import com.clarifai.api.Tag;
 import com.mongodb.*;
 import org.eclipse.jetty.util.MultiPartInputStreamParser;
+import org.joda.time.DateTime;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
 import spark.Request;
 import spark.Response;
 import spark.Route;
@@ -19,10 +22,7 @@ import java.io.File;
 import java.io.IOException;
 import java.net.UnknownHostException;
 import java.nio.file.Files;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
-import java.util.Random;
+import java.util.*;
 
 import static spark.Spark.get;
 import static spark.Spark.post;
@@ -32,7 +32,30 @@ import static spark.Spark.post;
  */
 public class Server {
     private static List<String> blacklist = new ArrayList<>();
+    private static List<Hack> hacks = new ArrayList<>();
+    private static void loadHacks() {
+        File hacksF = new File("hacks");
+        if (!hacksF.exists()) {
+            try {
+                hacksF.createNewFile();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        try {
+            for (String line : Files.readAllLines(new File("hacks").toPath())) {
+                String[] split = line.split(":");
+                List<String> tags = Arrays.asList(split[0].split(","));
+                String result = split[1];
+                Hack hack = new Hack(tags,result);
+                hacks.add(hack);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
     public static void main(String[] args) {
+        loadHacks();
         try {
             blacklist.addAll(Files.readAllLines(new File("blacklist").toPath()));
         } catch (IOException e) {
@@ -45,14 +68,23 @@ public class Server {
                 req.raw().setAttribute("org.eclipse.multipartConfig", multipartConfigElement);
                 MultiPartInputStreamParser.MultiPart file = (MultiPartInputStreamParser.MultiPart) req.raw().getPart("file");
                 List<Tag> tags = getTags(file.getFile());
-
+                System.out.println("detected tags" + tags);
+                for (Hack hack : hacks) {
+                    if (hack.isSatis(tags)) {
+                        Food food = getFood(hack.getResult(),"1");
+                        if (food != null) {
+                            System.out.println("used hack");
+                            storeInServer(food);
+                            return food.toString();
+                        }
+                    }
+                }
                 for (Tag tag : tags) {
                     if (!blacklist.contains(tag.getName())) {
                         Food food = getFood(tag.getName(),"1");
                         if (food != null) {
                             storeInServer(food);
-                            System.out.println("ueouaoeuoa");
-                            return caloriesToday("1");
+                            return food.toString();
                         }
                     }
                 }
@@ -69,17 +101,26 @@ public class Server {
                         "</form>";
             }
         });
-        get("/stats/:id/:city", new Route() {
+        get("/stats/:id/:lat/:long", new Route() {
             @Override
             public Object handle(Request req, Response res) throws Exception {
                 String userId = req.params(":id");
+                String lat = req.params(":lat");
+                String longi = req.params(":long");
+                System.out.println(lat + ":" + longi);
                 double calories = caloriesToday(userId);
-                double avgCityCalories = avgCaloriesInCityToday(req.params("city"));
                 double lastCalories = lastCalories(userId);
+                getReverseGeoCoding getReverseGeoCoding = cityFromLatLong(lat, longi);
+                String city = getReverseGeoCoding.getCity();
+                String zip = getReverseGeoCoding.getPIN();
+                double avgCityCalories = avgCaloriesInCityToday(city);
+                System.out.println(city + ":" + zip);
                 JSONObject jsonObject = new JSONObject();
                 jsonObject.put("calories",calories);
                 jsonObject.put("avg_city",avgCityCalories);
                 jsonObject.put("last_calories",lastCalories);
+                JSONArray jsonArray = new JSONArray(getMessages(userId,city,zip));
+                jsonObject.put("messages",jsonArray);
                 return jsonObject.toString();
             }
         });
@@ -216,6 +257,11 @@ public class Server {
         }
         return 0;
     }
+    public static getReverseGeoCoding cityFromLatLong(String lat, String longi) {
+        getReverseGeoCoding getReverseGeoCoding = new getReverseGeoCoding();
+        getReverseGeoCoding.getAddress(longi+"",lat+"");
+        return getReverseGeoCoding;
+    }
     public static double avgCaloriesInCityToday(String cityName) {
         try {
             MongoClient mongoClient = new MongoClient();
@@ -241,78 +287,85 @@ public class Server {
         }
         return 0;
     }
-    public static ArrayList<String> getMessages(String userId) {
-        ArrayList<String> messages = new ArrayList<String>();
-
-        MongoClient mongoClient = new MongoClient();
-        DB db = mongoClient.getDB("test");
-        DBCollection coll = db.getCollection("food_log");
-        DateTime dt = new DateTime();
-        hours = dt.getHoursOfDay()-5;
-        int currentCalories = caloriesToday(userId);
-        int targetCalories = 0;
-        if (hours > 0) {
-            targetCalories = (2250/14)*hours;
-        }
-
-        if (currentCalories < targetCalories-50) {
-            messages.add("Are you sure that's enough?");
-        } else if (currentCalories > targetCalories+50) {
-            messages.add("Watch out! You're passing your limit.")
-        }
-
-        String zipcode = "19148"; //change
-        String metro = "philly"; //change
-        Resty r = new Resty();
+    public static ArrayList<String> getMessages(String userId, String zip, String city) {
+        String[] eatMore = {"eat","food","fest"};
+        String[] exerciseMore = {"work out", "exercise","run","fitness"};
         try {
-            NodeList results = r.xml("https://api.everyblock.com/content/"+metro+"/locations/" + zipcode + "/timeline/events/?token=6e54dcfff8edba4f8df29d93ee19aaececfe5589")
-                    .get("root/results/list-item");
-            for (int i=0; i<results.getLength(); i++){
-                Node item = results.item(i);
-                String description = results.item(i).getTextContent().toLowerCase();
-                if (currentCalories < targetCalories-50) {
-                    for (String e:eatMore) {
-                        if (description.contains(e)) {
-                            messages.add("SUGGESTED EVENT: "+item.getChildNodes().item(1).getTextContent());
-                            break;
+            ArrayList<String> messages = new ArrayList<String>();
+
+            MongoClient mongoClient = new MongoClient();
+            DB db = mongoClient.getDB("test");
+            DBCollection coll = db.getCollection("food_log");
+            DateTime dt = new DateTime();
+            int hours = dt.getHourOfDay()-5;
+            int currentCalories = (int) caloriesToday(userId);
+            int targetCalories = 0;
+            if (hours > 0) {
+                targetCalories = (2250/14)*hours;
+            }
+
+            if (currentCalories < targetCalories-50) {
+                messages.add("Are you sure that's enough?");
+            } else if (currentCalories > targetCalories+50) {
+                messages.add("Watch out! You're passing your limit.");
+            }
+
+            String zipcode = "19148"; //change
+            String metro = "philly"; //change
+            Resty r = new Resty();
+            try {
+                NodeList results = r.xml("https://api.everyblock.com/content/"+metro+"/locations/" + zipcode + "/timeline/events/?token=6e54dcfff8edba4f8df29d93ee19aaececfe5589")
+                        .get("root/results/list-item");
+                for (int i=0; i<results.getLength(); i++){
+                    Node item = results.item(i);
+                    String description = results.item(i).getTextContent().toLowerCase();
+                    if (currentCalories < targetCalories-50) {
+                        for (String e:eatMore) {
+                            if (description.contains(e)) {
+                                messages.add("SUGGESTED EVENT: "+item.getChildNodes().item(1).getTextContent());
+                                break;
+                            }
                         }
-                    }
-                } else if (currentCalories > targetCalories+50) {
-                    for (String e:exerciseMore) {
-                        if (description.contains(e)) {
-                            messages.add("SUGGESTED EVENT: " + item.getChildNodes().item(1).getTextContent());
-                            break;
+                    } else if (currentCalories > targetCalories+50) {
+                        for (String e:exerciseMore) {
+                            if (description.contains(e)) {
+                                messages.add("SUGGESTED EVENT: " + item.getChildNodes().item(1).getTextContent());
+                                break;
+                            }
                         }
                     }
                 }
-            }
 
-            results = r.xml("https://api.everyblock.com/content/"+metro+"/topnews/events/?token=6e54dcfff8edba4f8df29d93ee19aaececfe5589")
-                    .get("root/results/list-item");
+                results = r.xml("https://api.everyblock.com/content/"+metro+"/topnews/events/?token=6e54dcfff8edba4f8df29d93ee19aaececfe5589")
+                        .get("root/results/list-item");
 
-            for (int i=0; i<results.getLength(); i++){
-                Node item = results.item(i);
-                String description = results.item(i).getTextContent().toLowerCase();
-                if (currentCalories < targetCalories-50) {
-                    for (String e:eatMore) {
-                        if (description.contains(e)) {
-                            messages.add("SUGGESTED EVENT: " + item.getChildNodes().item(1).getTextContent());
-                            break;
+                for (int i=0; i<results.getLength(); i++){
+                    Node item = results.item(i);
+                    String description = results.item(i).getTextContent().toLowerCase();
+                    if (currentCalories < targetCalories-50) {
+                        for (String e:eatMore) {
+                            if (description.contains(e)) {
+                                messages.add("SUGGESTED EVENT: " + item.getChildNodes().item(1).getTextContent());
+                                break;
+                            }
                         }
-                    }
-                } else if (currentCalories > targetCalories+50) {
-                    for (String e:exerciseMore) {
-                        if (description.contains(e)) {
-                            messages.add("SUGGESTED EVENT: "+item.getChildNodes().item(1).getTextContent());
-                            break;
+                    } else if (currentCalories > targetCalories+50) {
+                        for (String e:exerciseMore) {
+                            if (description.contains(e)) {
+                                messages.add("SUGGESTED EVENT: "+item.getChildNodes().item(1).getTextContent());
+                                break;
+                            }
                         }
                     }
                 }
+            } catch (Exception e) {
+                // TODO Auto-generated catch block
+                e.printStackTrace();
             }
+            return messages;
         } catch (Exception e) {
-            // TODO Auto-generated catch block
             e.printStackTrace();
         }
-        return messages;
+        return new ArrayList<>();
     }
 }

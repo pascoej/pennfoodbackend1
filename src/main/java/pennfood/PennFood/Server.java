@@ -241,5 +241,78 @@ public class Server {
         }
         return 0;
     }
+    public static ArrayList<String> getMessages(String userId) {
+        ArrayList<String> messages = new ArrayList<String>();
 
+        MongoClient mongoClient = new MongoClient();
+        DB db = mongoClient.getDB("test");
+        DBCollection coll = db.getCollection("food_log");
+        DateTime dt = new DateTime();
+        hours = dt.getHoursOfDay()-5;
+        int currentCalories = caloriesToday(userId);
+        int targetCalories = 0;
+        if (hours > 0) {
+            targetCalories = (2250/14)*hours;
+        }
+
+        if (currentCalories < targetCalories-50) {
+            messages.add("Are you sure that's enough?");
+        } else if (currentCalories > targetCalories+50) {
+            messages.add("Watch out! You're passing your limit.")
+        }
+
+        String zipcode = "19148"; //change
+        String metro = "philly"; //change
+        Resty r = new Resty();
+        try {
+            NodeList results = r.xml("https://api.everyblock.com/content/"+metro+"/locations/" + zipcode + "/timeline/events/?token=6e54dcfff8edba4f8df29d93ee19aaececfe5589")
+                    .get("root/results/list-item");
+            for (int i=0; i<results.getLength(); i++){
+                Node item = results.item(i);
+                String description = results.item(i).getTextContent().toLowerCase();
+                if (currentCalories < targetCalories-50) {
+                    for (String e:eatMore) {
+                        if (description.contains(e)) {
+                            messages.add("SUGGESTED EVENT: "+item.getChildNodes().item(1).getTextContent());
+                            break;
+                        }
+                    }
+                } else if (currentCalories > targetCalories+50) {
+                    for (String e:exerciseMore) {
+                        if (description.contains(e)) {
+                            messages.add("SUGGESTED EVENT: " + item.getChildNodes().item(1).getTextContent());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            results = r.xml("https://api.everyblock.com/content/"+metro+"/topnews/events/?token=6e54dcfff8edba4f8df29d93ee19aaececfe5589")
+                    .get("root/results/list-item");
+
+            for (int i=0; i<results.getLength(); i++){
+                Node item = results.item(i);
+                String description = results.item(i).getTextContent().toLowerCase();
+                if (currentCalories < targetCalories-50) {
+                    for (String e:eatMore) {
+                        if (description.contains(e)) {
+                            messages.add("SUGGESTED EVENT: " + item.getChildNodes().item(1).getTextContent());
+                            break;
+                        }
+                    }
+                } else if (currentCalories > targetCalories+50) {
+                    for (String e:exerciseMore) {
+                        if (description.contains(e)) {
+                            messages.add("SUGGESTED EVENT: "+item.getChildNodes().item(1).getTextContent());
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
+        return messages;
+    }
 }
